@@ -19,7 +19,8 @@
     direct_write/5,
     get_records_cnt/0,
     initialize_connection/2,
-    ensure_table_exists/2
+    ensure_table_exists/2,
+    scan_table/2
 ]).
 
 %% gen_server callbacks
@@ -31,6 +32,14 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc Scan HBase Table and return the list of resulting rows
+%% @spec scan_table(Table::binary(), Columns::list()) -> ok
+%% @end
+%%--------------------------------------------------------------------
+scan_table(Table, Columns) when is_list(Columns) ->
+  gen_server:call(?MODULE, {scan_table, ensure_binary(Table), Columns}).
 
 %%--------------------------------------------------------------------
 %% @doc Establish initial connection to thrift gateway server
@@ -109,6 +118,30 @@ create_table(ThriftClient, Table, ColumnFamily) ->
   ],
   {TC1, _Result} = thrift_client:call(ThriftClient, createTable, [ensure_list(Table), ColumnFamilies]),
   TC1.
+
+ensure_binary(Bin) when is_binary(Bin) ->
+  Bin;
+ensure_binary(List) when is_list(List) ->
+  list_to_binary(List);
+ensure_binary(Atom) when is_atom(Atom) ->
+  atom_to_binary(Atom, latin1).
+
+
+scan_table(Table, Columns, ThriftClient) ->
+  %% Init scaner:
+  {NewThriftClient, {ok, ScanId}} = thrift_client:call(ThriftClient, scannerOpen, [Table, <<"">>, Columns, dict:new()]),
+  scan_table(Table, Columns, NewThriftClient, ScanId, []).
+
+scan_table(Table, Columns, ThriftClient, ScanId, Results) ->
+  {NewThriftClient, Result} = thrift_client:call(ThriftClient, scannerGet, [ScanId]),
+  case Result of
+    {ok, []} ->
+      {NewThriftClient, Results};
+    {ok, Row} ->
+      scan_table(Table, Columns, NewThriftClient, ScanId, [Row|Results]);
+    _Other ->
+      {NewThriftClient, Results}
+  end.
   
 %%%===================================================================
 %%% gen_server callbacks
@@ -162,6 +195,10 @@ handle_call({direct_write, Message, Table, Column, KeyGenFun, ValueGenFun }, _Fr
 handle_call(get_records_cnt, _From, #state{records_since_last_metrics_call=RecordsCnt}=State) ->
   NewState = State#state{records_since_last_metrics_call=0},
   {reply, {ok, RecordsCnt}, NewState};
+
+handle_call({scan_table, Table, Columns}, _From, #state{client=ThriftClient} = State) ->
+  {NewThriftClient, Results} = scan_table(Table, Columns, ThriftClient),
+  {reply, {ok,Results}, State#state{client=NewThriftClient}};
 
 handle_call(_Request, _From, State) ->
   {noreply, State}.
